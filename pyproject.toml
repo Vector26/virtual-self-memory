@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "virtual-self-memory"
+version = "0.1.0"
+description = "Agent-independent virtual-self memory and personality service"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "psycopg[binary,pool]>=3.2.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "structlog>=24.4.0",
+  "prometheus-client>=0.21.0",
+  "prometheus-fastapi-instrumentator>=7.0.0",
+  "cryptography>=43.0.0",
+  "httpx>=0.27.0",
+  "click>=8.1.0",
+  "uuid6>=2024.7.10",
+  "pyyaml>=6.0.2",
+  "mcp>=1.6.0",
+  "duckdb>=1.1.0",
+  "pyarrow>=18.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.8.0",
+]
+
+[project.scripts]
+virtual-self = "virtual_self.cli.main:cli"
+virtual-self-mcp = "virtual_self.mcp.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/virtual_self"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-m 'not live_searxng and not e1_wip'"
+markers = [
+  "live_searxng: hits a running SearXNG container (flaky/offline)",
+  "e1_wip: E-1 worker in progress — skip in full pytest",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

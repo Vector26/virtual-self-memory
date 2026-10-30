@@ -1,0 +1,14 @@
+# Virtual Self — SearXNG (W-2). Secret via SEARXNG_SECRET in compose (.env).
+# https://docs.searxng.org/admin/settings/
+
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  image_proxy: false

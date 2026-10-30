@@ -1,0 +1,267 @@
+# Virtual Self Memory — local-first stack
+# Corpus is read-only inside containers; LLM/embeddings via host.docker.internal only.
+name: virtual-self
+
+x-vsm-common: &vsm_common
+  image: virtual-self-memory:latest
+  build: .
+  env_file: ${VSM_ENV_FILE:-.env}
+  environment: &vsm_env
+    VSM_DATABASE_URL: postgresql://virtual_self:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/virtual_self
+    VSM_MY_LIFE_ROOT: /corpus
+    VSM_OLLAMA_URL: http://host.docker.internal:11434
+    VSM_OPENAI_BASE_URL: http://host.docker.internal:8181/v1
+    VSM_OPENAI_MODEL: ${VSM_OPENAI_MODEL:-local}
+    VSM_CHAT_MEMORY_LLM_BACKEND: ${VSM_CHAT_MEMORY_LLM_BACKEND:-ollama}
+    VSM_CHAT_MEMORY_MODEL: ${VSM_CHAT_MEMORY_MODEL:-qwen2.5:7b}
+    VSM_WEB_AUDIT_PATH: /app/.state/web_audit.jsonl
+    VSM_ARCHIVE_DATA_ROOT: /data/archive
+    VSM_WEB_GATEWAY_URL: http://knowledge-gateway:8080
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - type: bind
+      source: ${VSM_MY_LIFE_ROOT}
+      target: /corpus
+      read_only: true
+    - type: bind
+      source: ./.state
+      target: /app/.state
+    - type: bind
+      source: ${VSM_ARCHIVE_DATA_ROOT:-./private/archive}
+      target: /data/archive
+      read_only: true
+  networks:
+    - internal
+  depends_on:
+    postgres:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: virtual_self_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: virtual_self
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: virtual_self
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - virtual_self_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U virtual_self -d virtual_self"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 2g
+    networks:
+      - internal
+
+  api:
+    <<: *vsm_common
+    container_name: virtual_self_api
+    restart: unless-stopped
+    environment:
+      <<: *vsm_env
+      VSM_API_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8090:8090"
+    command: ["virtual-self", "serve"]
+    mem_limit: 512m
+
+  worker:
+    <<: *vsm_common
+    container_name: virtual_self_worker
+    restart: unless-stopped
+    command: ["virtual-self", "worker"]
+    mem_limit: 512m
+
+  chat:
+    <<: *vsm_common
+    profiles: ["cli"]
+    container_name: virtual_self_chat
+    stdin_open: true
+    tty: true
+    command: ["virtual-self", "start"]
+    mem_limit: 768m
+
+  bake:
+    <<: *vsm_common
+    profiles: ["bake"]
+    container_name: virtual_self_bake
+    command: ["virtual-self", "bake"]
+    mem_limit: 768m
+
+  migrate:
+    <<: *vsm_common
+    profiles: ["tools"]
+    container_name: virtual_self_migrate
+    command: ["virtual-self", "migrate"]
+
+  archive-sync:
+    <<: *vsm_common
+    profiles: ["archive"]
+    container_name: virtual_self_archive_sync
+    read_only: true
+    command: ["virtual-self", "archive", "sync-loop"]
+    mem_limit: 256m
+    volumes:
+      - type: bind
+        source: ${VSM_MY_LIFE_ROOT}
+        target: /corpus
+        read_only: true
+      - type: bind
+        source: ./.state
+        target: /app/.state
+      - type: bind
+        source: ${VSM_ARCHIVE_DATA_ROOT:-./private/archive}
+        target: /data/archive
+      - type: bind
+        source: ${VSM_ARCHIVE_RCLONE_CONFIG:-./private/rclone.conf}
+        target: /config/rclone/rclone.conf
+        read_only: true
+    environment:
+      <<: *vsm_env
+      VSM_ARCHIVE_DATA_ROOT: /data/archive
+      VSM_ARCHIVE_RCLONE_CONFIG: /config/rclone/rclone.conf
+
+  archive-worker:
+    <<: *vsm_common
+    profiles: ["archive"]
+    container_name: virtual_self_archive_worker
+    read_only: true
+    command: ["virtual-self", "worker"]
+    mem_limit: 1g
+    volumes:
+      - type: bind
+        source: ${VSM_MY_LIFE_ROOT}
+        target: /corpus
+        read_only: true
+      - type: bind
+        source: ./.state
+        target: /app/.state
+      - type: bind
+        source: ${VSM_ARCHIVE_DATA_ROOT:-./private/archive}
+        target: /data/archive
+      - type: bind
+        source: ${VSM_ARCHIVE_RCLONE_CONFIG:-./private/rclone.conf}
+        target: /config/rclone/rclone.conf
+        read_only: true
+    environment:
+      <<: *vsm_env
+      VSM_ARCHIVE_DATA_ROOT: /data/archive
+      VSM_ARCHIVE_RCLONE_CONFIG: /config/rclone/rclone.conf
+      VSM_ARCHIVE_LLM_ENABLED: "true"
+
+  knowledge-gateway:
+    profiles: ["web"]
+    image: ghcr.io/littleoffice/mcp-searxng-relay@sha256:a404ce2372c95a6c1fc59db96add4db936527a1f87a4786128a9779f6be0327b
+    container_name: virtual_self_knowledge_gateway
+    restart: unless-stopped
+    depends_on:
+      searxng:
+        condition: service_started
+    environment:
+      MCP_PORT: "8080"
+      MCP_AUTH_TOKEN: ${WEB_GATEWAY_MCP_TOKEN:?Set WEB_GATEWAY_MCP_TOKEN in .env}
+      SEARXNG_URL: http://searxng:8080
+      LOG_FORMAT: json
+      # W-3: text + bounded PDF only (no vision images, no Office docs)
+      MAX_IMAGE_BYTES: "0"
+      MAX_OFFICE_BYTES: "0"
+      MAX_PDF_BYTES: "2097152"
+      MAX_BODY_BYTES: "2097152"
+      MAX_EXTRACTED_CHARS: "20000"
+    ports:
+      - "127.0.0.1:${WEB_GATEWAY_PORT:-8099}:8080"
+    networks:
+      - internal
+      - web_egress
+    mem_limit: 256m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+
+  searxng:
+    profiles: ["web"]
+    image: searxng/searxng:latest
+    container_name: virtual_self_searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:${SEARXNG_PORT:-8098}/
+      SEARXNG_SECRET: ${SEARXNG_SECRET_KEY:?Set SEARXNG_SECRET_KEY in .env}
+      SEARXNG_LIMITER: "true"
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8098}:8080"
+    volumes:
+      - type: bind
+        source: ./web/searxng/settings.yml
+        target: /etc/searxng/settings.yml
+        read_only: true
+    networks:
+      - web_egress
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  archive-flow-loop:
+    <<: *vsm_common
+    profiles: ["archive"]
+    container_name: virtual_self_archive_flow_loop
+    restart: unless-stopped
+    read_only: true
+    command: ["bash", "/app/scripts/archive-flow-watchdog.sh"]
+    mem_limit: 256m
+    volumes:
+      - type: bind
+        source: ${VSM_MY_LIFE_ROOT}
+        target: /corpus
+        read_only: true
+      - type: bind
+        source: ./.state
+        target: /app/.state
+      - type: bind
+        source: ${VSM_ARCHIVE_DATA_ROOT:-./private/archive}
+        target: /data/archive
+      - type: bind
+        source: ${VSM_ARCHIVE_RCLONE_CONFIG:-./private/rclone.conf}
+        target: /config/rclone/rclone.conf
+        read_only: true
+      - type: bind
+        source: ./scripts/archive-flow-watchdog.sh
+        target: /app/scripts/archive-flow-watchdog.sh
+        read_only: true
+      - type: bind
+        source: /tmp/archive-flow.log
+        target: /tmp/archive-flow.log
+    environment:
+      <<: *vsm_env
+      VSM_ARCHIVE_DATA_ROOT: /data/archive
+      VSM_ARCHIVE_RCLONE_CONFIG: /config/rclone/rclone.conf
+      VSM_ARCHIVE_FLOW_IN_CONTAINER: "1"
+      VSM_ARCHIVE_FLOW_LOG: /tmp/archive-flow.log
+
+networks:
+  internal:
+    name: virtual_self_internal
+    internal: true
+  web_egress:
+    name: virtual_self_web_egress
+
+volumes:
+  virtual_self_pgdata:
+    name: virtual_self_pgdata
